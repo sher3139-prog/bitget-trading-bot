@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-"""
-BITGET TRADING BOT v1.0 - STABLE WEBHOOK ENGINE
-"""
-
 import os
-import sys
-import logging
 import threading
+import logging
 from datetime import datetime
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from flask_cors import CORS
-import requests
+import telebot
 
-# LOGGING SETUP
+# LOGGING
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -40,82 +35,61 @@ CORS(app)
 
 @app.route('/')
 def index():
-    return "<h1>Bitget Bot Engine Aktif</h1>"
+    return "<h1>Bitget Bot Sistemi Aktif</h1>"
 
 @app.route('/api/status')
 def status():
-    return jsonify({
-        "status": BOT_STATUS["status"],
-        "daily_trades": BOT_STATUS["daily_trades"],
-        "daily_loss": BOT_STATUS["daily_loss"],
-        "leverage": BOT_STATUS["leverage"],
-        "positions": BOT_STATUS["positions"]
-    })
+    return jsonify(BOT_STATUS)
 
-# TELEGRAM MANUEL POLLING ENGINE (NO LIBRARY CONFLICT)
-def telegram_worker():
-    if not TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN bulunamadı!")
-        return
-
-    logger.info("Telegram Dinleme Motoru Başlatıldı...")
-    offset = 0
+# TELEGRAM BOT SETUP
+if TOKEN:
+    bot = telebot.TeleBot(TOKEN, threaded=False)
     
-    # Eski birikmiş mesajları temizle ve bağlantıyı doğrula
-    try:
-        requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset=-1", timeout=5)
-    except Exception as e:
-        logger.error(f"Telegram baglanti hatasi: {e}")
+    @bot.message_handler(commands=['start', 'help'])
+    def send_welcome(message):
+        welcome_text = (
+            "🤖 *Bitget Trading Bot v1.0 Başlatıldı!*\n\n"
+            "Kullanabileceğiniz Komutlar:\n"
+            "📊 `/durum` - Botun anlık çalışma durumunu gösterir.\n"
+            "📈 `/sinyal` - Teknik analiz sinyalini tetikler.\n"
+            "💼 `/islemler` - Son açılan pozisyonları listeler."
+        )
+        bot.reply_to(message, welcome_text, parse_mode='Markdown')
 
-    while True:
-        try:
-            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=10"
-            response = requests.get(url, timeout=15).json()
-            
-            if response.get("ok") and response.get("result"):
-                for update in response["result"]:
-                    offset = update["update_id"] + 1
-                    if "message" in update and "text" in update["message"]:
-                        chat_id = update["message"]["chat"]["id"]
-                        text = update["message"]["text"].strip()
-                        
-                        # Komut Kontrolleri
-                        if text in ["/start", "/help"]:
-                            reply = (
-                                "🤖 *Bitget Trading Bot v1.0 Başlatıldı!*\n\n"
-                                "Kullanabileceğiniz Komutlar:\n"
-                                "📊 `/durum` - Botun anlık çalışma durumunu gösterir.\n"
-                                "📈 `/sinyal` - Teknik analiz sinyalini tetikler.\n"
-                                "💼 `/islemler` - Son açılan pozisyonları listeler."
-                            )
-                        elif text == "/durum":
-                            reply = (
-                                f"ℹ️ *Bot Durumu:* {BOT_STATUS['status'].upper()}\n"
-                                f"🔄 *Günlük İşlem:* {BOT_STATUS['daily_trades']}\n"
-                                f"📉 *Günlük Kayıp:* {BOT_STATUS['daily_loss']}\n"
-                                f"⚙️ *Kaldıraç:* {BOT_STATUS['leverage']}"
-                            )
-                        elif text in ["/sinyal", "/islemler"]:
-                            reply = "📋 *Son İşlemler:*\n\n"
-                            for t in BOT_STATUS["positions"]:
-                                icon = "🟢 LONG" if t['side'] == "LONG" else "🔴 SHORT"
-                                msg_line = f"▪️ *{t['symbol']}* -> {icon}\nGiriş: {t['entry_price']}\nDurum: {t['status']}\n"
-                                reply += msg_line
-                        else:
-                            continue
-                            
-                        # Cevap Gönder
-                        send_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-                        requests.post(send_url, json={"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"})
-                        
-        except Exception as e:
-            pass
+    @bot.message_handler(commands=['durum'])
+    def send_status(message):
+        status_msg = (
+            f"ℹ️ *Bot Durumu:* {BOT_STATUS['status'].upper()}\n"
+            f"🔄 *Günlük İşlem:* {BOT_STATUS['daily_trades']}\n"
+            f"📉 *Günlük Kayıp:* {BOT_STATUS['daily_loss']}\n"
+            f"⚙️ *Kaldıraç:* {BOT_STATUS['leverage']}"
+        )
+        bot.reply_to(message, status_msg, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['sinyal', 'islemler'])
+    def send_trades(message):
+        msg = "📋 *Son İşlemler:*\n\n"
+        for t in BOT_STATUS["positions"]:
+            icon = "🟢 LONG" if t['side'] == "LONG" else "🔴 SHORT"
+            msg += f"▪️ *{t['symbol']}* -> {icon}\nGiriş: {t['entry_price']}\nDurum: {t['status']}\n"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+else:
+    bot = None
+    logger.error("TELEGRAM_BOT_TOKEN bulunamadı!")
+
+def run_flask():
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
-    # Telegram motorunu ayrı bir kanalda güvenli bir şekilde çalıştırıyoruz
-    t = threading.Thread(target=telegram_worker, daemon=True)
-    t.start()
-    
-    # Flask sunucusunu ana kanalda ayağa kaldırıyoruz
-    logger.info(f"Flask web sunucusu {PORT} portunda baslatiliyor...")
-    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+    # Flask sunucusunu arka planda başlat
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # Telegram botunu ana döngüde çalıştır
+    if bot:
+        logger.info("Telegram Bot dinleme modu (Polling) başlatılıyor...")
+        try:
+            # Önceki takılı kalan mesajları temizle
+            bot.remove_webhook()
+            bot.infinity_polling(timeout=20, long_polling_timeout=10)
+        except Exception as e:
+            logger.error(f"Bot Polling Hatası: {e}")
