@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: bitget-trading-bot
+    runtime: python310
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bitget_trading_bot_v1.py
+    envVars:
+      - key: BITGET_API_KEY
+        scope: run
+        value: (Set from Bitget dashboard)
+      - key: BITGET_SECRET_KEY
+        scope: run
+        value: (Set from Bitget dashboard)
+      - key: BITGET_PASSPHRASE
+        scope: run
+        value: (Set from Bitget dashboard)
+      - key: TELEGRAM_BOT_TOKEN
+        scope: run
+        value: (Create with @BotFather)
+      - key: TELEGRAM_CHAT_ID
+        scope: run
+        value: (Get from Telegram API)
+      - key: BOT_MODE
+        scope: run
+        value: paper
