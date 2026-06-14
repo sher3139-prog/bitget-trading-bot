@@ -7,7 +7,6 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import telebot
 
-# LOGGING
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,6 @@ def index():
 def status():
     return jsonify(BOT_STATUS)
 
-# TELEGRAM BOT SETUP
 if TOKEN:
     bot = telebot.TeleBot(TOKEN, threaded=False)
     
@@ -65,31 +63,18 @@ if TOKEN:
             f"⚙️ *Kaldıraç:* {BOT_STATUS['leverage']}"
         )
         bot.reply_to(message, status_msg, parse_mode='Markdown')
-
-    @bot.message_handler(commands=['sinyal', 'islemler'])
-    def send_trades(message):
-        msg = "📋 *Son İşlemler:*\n\n"
-        for t in BOT_STATUS["positions"]:
-            icon = "🟢 LONG" if t['side'] == "LONG" else "🔴 SHORT"
-            msg += f"▪️ *{t['symbol']}* -> {icon}\nGiriş: {t['entry_price']}\nDurum: {t['status']}\n"
-        bot.reply_to(message, msg, parse_mode='Markdown')
 else:
     bot = None
-    logger.error("TELEGRAM_BOT_TOKEN bulunamadı!")
 
 def run_flask():
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
-    # Flask sunucusunu arka planda başlat
     threading.Thread(target=run_flask, daemon=True).start()
-
-    # Telegram botunu ana döngüde çalıştır
     if bot:
-        logger.info("Telegram Bot dinleme modu (Polling) başlatılıyor...")
+        logger.info("Telegram Bot başlatılıyor...")
         try:
-            # Önceki takılı kalan mesajları temizle
             bot.remove_webhook()
-            bot.infinity_polling(timeout=20, long_polling_timeout=10)
+            bot.infinity_polling(timeout=10)
         except Exception as e:
-            logger.error(f"Bot Polling Hatası: {e}")
+            logger.error(f"Hata: {e}")
