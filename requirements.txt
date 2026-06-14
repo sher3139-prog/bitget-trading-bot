@@ -1,4 +1,6 @@
 aiohttp==3.9.1
+setuptools>=40.0.0
+wheel
 numpy==1.24.3
 pandas==2.0.3
 python-dotenv==1.0.0
