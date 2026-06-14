@@ -1,11 +1,13 @@
 services:
   - type: web
     name: bitget-trading-bot
-    runtime: python310
+    env: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bitget_trading_bot_v1.py
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.11
       - key: BITGET_API_KEY
         scope: run
         value: (Set from Bitget dashboard)
