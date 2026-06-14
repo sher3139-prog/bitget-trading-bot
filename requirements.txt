@@ -1,11 +1,4 @@
-aiohttp==3.9.1
-setuptools>=40.0.0
-wheel
-numpy==1.24.3
-pandas==2.0.3
-python-dotenv==1.0.0
-pyTelegramBotAPI==4.14.0
-requests==2.31.0
 flask==3.0.0
 flask-cors==4.0.0
-cryptography==41.0.0
+requests==2.31.0
+pyTelegramBotAPI==4.14.0
