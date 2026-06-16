@@ -1,476 +1,459 @@
+#!/usr/bin/env python3
 """
-Utility functions for Bitget Trading Bot
-Technical indicators, data processing, helpers
+UTILS V2 - Advanced Technical Indicators & Analysis
+===================================================
+
+Includes:
+- ADX (Average Directional Index) for market regime detection
+- Confluence Zone Analyzer for multi-level confluence
+- Enhanced Price Action analysis
+- Risk Calculations
+- Data Processor
 """
 
+import logging
+from typing import List, Dict, Tuple, Optional
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Tuple, Optional
-from datetime import datetime, timedelta
-import hashlib
-import hmac
-from base64 import b64encode
-import logging
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# TECHNICAL INDICATORS
-# ============================================================================
-
-class TechnicalIndicators:
-    """Technical indicators calculations"""
-    
-    @staticmethod
-    def sma(data: List[float], period: int) -> np.ndarray:
-        """Simple Moving Average"""
-        return pd.Series(data).rolling(window=period).mean().values
-    
-    @staticmethod
-    def ema(data: List[float], period: int) -> np.ndarray:
-        """Exponential Moving Average"""
-        return pd.Series(data).ewm(span=period, adjust=False).mean().values
-    
-    @staticmethod
-    def rsi(data: List[float], period: int = 14) -> np.ndarray:
-        """Relative Strength Index (0-100)"""
-        delta = np.diff(data)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = pd.Series(gain).rolling(window=period).mean()
-        avg_loss = pd.Series(loss).rolling(window=period).mean()
-        
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi_values = 100 - (100 / (1 + rs))
-        
-        return rsi_values.values
-    
-    @staticmethod
-    def macd(data: List[float], fast: int = 12, slow: int = 26, 
-             signal: int = 9) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """MACD (Moving Average Convergence Divergence)"""
-        ema_fast = TechnicalIndicators.ema(data, fast)
-        ema_slow = TechnicalIndicators.ema(data, slow)
-        
-        macd_line = ema_fast - ema_slow
-        signal_line = TechnicalIndicators.ema(macd_line, signal)
-        histogram = macd_line - signal_line
-        
-        return macd_line, signal_line, histogram
-    
-    @staticmethod
-    def atr(highs: List[float], lows: List[float], 
-            closes: List[float], period: int = 14) -> np.ndarray:
-        """Average True Range (volatility)"""
-        tr1 = np.array(highs) - np.array(lows)
-        tr2 = np.abs(np.array(highs) - np.array(closes[:-1] + [closes[0]]))
-        tr3 = np.abs(np.array(lows) - np.array(closes[:-1] + [closes[0]]))
-        
-        tr = np.max([tr1, tr2, tr3], axis=0)
-        atr_values = pd.Series(tr).rolling(window=period).mean()
-        
-        return atr_values.values
-    
-    @staticmethod
-    def bollinger_bands(data: List[float], period: int = 20, 
-                        std_dev: float = 2.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Bollinger Bands"""
-        sma_values = TechnicalIndicators.sma(data, period)
-        std = pd.Series(data).rolling(window=period).std()
-        
-        upper_band = sma_values + (std * std_dev)
-        lower_band = sma_values - (std * std_dev)
-        
-        return upper_band, sma_values, lower_band
-    
-    @staticmethod
-    def stochastic(highs: List[float], lows: List[float], 
-                   closes: List[float], period: int = 14, 
-                   smooth_k: int = 3) -> Tuple[np.ndarray, np.ndarray]:
-        """Stochastic Oscillator"""
-        highest = pd.Series(highs).rolling(window=period).max()
-        lowest = pd.Series(lows).rolling(window=period).min()
-        
-        k_percent = 100 * (np.array(closes) - lowest) / (highest - lowest + 1e-10)
-        k_smooth = pd.Series(k_percent).rolling(window=smooth_k).mean()
-        d_smooth = pd.Series(k_smooth).rolling(window=smooth_k).mean()
-        
-        return k_smooth.values, d_smooth.values
-    
-    @staticmethod
-    def volume_weighted_average_price(highs: List[float], lows: List[float],
-                                     closes: List[float], volumes: List[float]) -> np.ndarray:
-        """VWAP - Volume Weighted Average Price"""
-        typical_price = (np.array(highs) + np.array(lows) + np.array(closes)) / 3
-        vwap = np.cumsum(typical_price * np.array(volumes)) / np.cumsum(volumes)
-        
-        return vwap
-
-# ============================================================================
-# PRICE ACTION PATTERNS
-# ============================================================================
-
-class PriceAction:
-    """Price action pattern detection"""
-    
-    @staticmethod
-    def is_hammer(open_: float, high: float, low: float, close: float,
-                  atr: float) -> bool:
-        """Detect hammer candlestick pattern"""
-        body = abs(close - open_)
-        upper_wick = high - max(open_, close)
-        lower_wick = min(open_, close) - low
-        
-        return (lower_wick > 2 * body and 
-                upper_wick < 0.5 * body and
-                body < atr * 0.3)
-    
-    @staticmethod
-    def is_engulfing(prev_open: float, prev_close: float, 
-                    curr_open: float, curr_close: float) -> Tuple[bool, str]:
-        """Detect engulfing pattern (bullish/bearish)"""
-        prev_body = prev_close - prev_open
-        curr_body = curr_close - curr_open
-        
-        # Bullish engulfing
-        if (curr_body > 0 and prev_body < 0 and
-            curr_open < prev_close and curr_close > prev_open):
-            return True, "BULLISH_ENGULFING"
-        
-        # Bearish engulfing
-        elif (curr_body < 0 and prev_body > 0 and
-              curr_open > prev_close and curr_close < prev_open):
-            return True, "BEARISH_ENGULFING"
-        
-        return False, "NONE"
-    
-    @staticmethod
-    def is_doji(open_: float, close: float, high: float, low: float,
-               atr: float) -> bool:
-        """Detect doji (indecision) pattern"""
-        body = abs(close - open_)
-        range_ = high - low
-        
-        return body < range_ * 0.05  # Body < 5% of range
-
-# ============================================================================
-# MARKET REGIME DETECTION
-# ============================================================================
-
-class MarketRegime:
-    """Detect market regime (trend/range/volatility)"""
-    
-    @staticmethod
-    def detect_trend(closes: List[float], period: int = 20) -> str:
-        """Detect if market is in uptrend, downtrend, or ranging"""
-        recent_closes = np.array(closes[-period:])
-        
-        slope = np.polyfit(range(len(recent_closes)), recent_closes, 1)[0]
-        
-        if slope > 0.0001:
-            return "UPTREND"
-        elif slope < -0.0001:
-            return "DOWNTREND"
-        else:
-            return "RANGING"
-    
-    @staticmethod
-    def detect_volatility_regime(atr: List[float], 
-                                period: int = 20) -> str:
-        """Detect volatility regime"""
-        recent_atr = np.array(atr[-period:])
-        mean_atr = np.mean(recent_atr)
-        current_atr = recent_atr[-1]
-        
-        if current_atr > mean_atr * 1.3:
-            return "HIGH_VOLATILITY"
-        elif current_atr < mean_atr * 0.7:
-            return "LOW_VOLATILITY"
-        else:
-            return "NORMAL_VOLATILITY"
-    
-    @staticmethod
-    def is_breakout(closes: List[float], highs: List[float], 
-                   lows: List[float], period: int = 20) -> Tuple[bool, str]:
-        """Detect if price is breaking out of range"""
-        recent_high = max(highs[-period:])
-        recent_low = min(lows[-period:])
-        current = closes[-1]
-        
-        if current > recent_high * 1.001:  # 0.1% above
-            return True, "BREAKOUT_UP"
-        elif current < recent_low * 0.999:  # 0.1% below
-            return True, "BREAKOUT_DOWN"
-        
-        return False, "NONE"
-
-# ============================================================================
-# CONFLUENCE DETECTION
-# ============================================================================
-
-class Confluence:
-    """Multiple factor confluence detection"""
-    
-    @staticmethod
-    def count_factors(factors: Dict[str, bool]) -> Tuple[int, float]:
-        """Count how many factors are confirmed"""
-        total = len(factors)
-        confirmed = sum([1 for v in factors.values() if v])
-        confidence = (confirmed / total * 100) if total > 0 else 0
-        
-        return confirmed, confidence
-    
-    @staticmethod
-    def get_strong_signal(factors: Dict[str, bool], 
-                         min_factors: int = 3) -> Tuple[bool, float]:
-        """Check if confluence is strong (at least min_factors)"""
-        confirmed, confidence = Confluence.count_factors(factors)
-        return confirmed >= min_factors, confidence
-
-# ============================================================================
-# DATA PROCESSING
-# ============================================================================
-
+# ==================== DATA PROCESSOR ====================
 class DataProcessor:
-    """Data cleaning and processing"""
+    """Process and validate OHLCV data from Bitget"""
     
     @staticmethod
-    def parse_klines(klines: List) -> Dict:
-        """Parse Bitget kline format"""
+    def process_klines(klines: List[Dict]) -> pd.DataFrame:
+        """
+        Convert Bitget klines to DataFrame
+        
+        Bitget format: [timestamp, open, high, low, close, volume, usdtVolume]
+        """
         if not klines:
+            return pd.DataFrame()
+        
+        try:
+            # Reverse to get oldest first
+            klines = list(reversed(klines))
+            
+            df = pd.DataFrame({
+                'timestamp': [int(k[0]) for k in klines],
+                'open': [float(k[1]) for k in klines],
+                'high': [float(k[2]) for k in klines],
+                'low': [float(k[3]) for k in klines],
+                'close': [float(k[4]) for k in klines],
+                'volume': [float(k[5]) for k in klines],
+                'usdt_volume': [float(k[6]) for k in klines] if len(k) > 6 else 0
+            })
+            
+            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+            
+            return df
+        except Exception as e:
+            logger.error(f"Error processing klines: {e}")
+            return pd.DataFrame()
+
+# ==================== TECHNICAL INDICATORS ====================
+class TechnicalIndicators:
+    """Collection of technical indicators"""
+    
+    @staticmethod
+    def calculate_ema(series: pd.Series, period: int) -> pd.Series:
+        """Exponential Moving Average"""
+        return series.ewm(span=period, adjust=False).mean()
+    
+    @staticmethod
+    def calculate_sma(series: pd.Series, period: int) -> pd.Series:
+        """Simple Moving Average"""
+        return series.rolling(window=period).mean()
+    
+    @staticmethod
+    def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+        """
+        Average True Range
+        Measures market volatility
+        """
+        try:
+            high = df['high']
+            low = df['low']
+            close = df['close']
+            
+            tr1 = high - low
+            tr2 = abs(high - close.shift())
+            tr3 = abs(low - close.shift())
+            
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr = tr.rolling(window=period).mean()
+            
+            df['atr'] = atr
+            return atr.iloc[-1] if not atr.empty else 0
+        except Exception as e:
+            logger.error(f"Error calculating ATR: {e}")
+            return 0
+    
+    @staticmethod
+    def calculate_rsi(series: pd.Series, period: int = 14) -> float:
+        """
+        Relative Strength Index
+        Measures overbought/oversold conditions
+        """
+        try:
+            delta = series.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+            
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            
+            return rsi.iloc[-1] if not rsi.empty else 50
+        except Exception as e:
+            logger.error(f"Error calculating RSI: {e}")
+            return 50
+    
+    @staticmethod
+    def calculate_adx(klines: List[Dict], period: int = 14) -> float:
+        """
+        Average Directional Index
+        
+        Detects market trend strength:
+        ADX > 25 = TRENDING (strong trend)
+        ADX < 20 = RANGING (consolidating)
+        
+        Returns: ADX value (0-100)
+        """
+        try:
+            df = DataProcessor.process_klines(klines)
+            if df.empty or len(df) < period:
+                return 0
+            
+            high = df['high']
+            low = df['low']
+            close = df['close']
+            
+            # Calculate +DM and -DM
+            plus_dm = high.diff()
+            minus_dm = -low.diff()
+            
+            # Handle conditions
+            plus_dm = plus_dm.where(
+                (plus_dm > 0) & (plus_dm > minus_dm),
+                0
+            )
+            minus_dm = minus_dm.where(
+                (minus_dm > 0) & (minus_dm > plus_dm),
+                0
+            )
+            
+            # Calculate True Range
+            tr1 = high - low
+            tr2 = abs(high - close.shift())
+            tr3 = abs(low - close.shift())
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            
+            # Smooth with ATR
+            atr = tr.rolling(window=period).mean()
+            
+            # Calculate DI+
+            di_plus = 100 * (plus_dm.rolling(window=period).mean() / atr)
+            di_minus = 100 * (minus_dm.rolling(window=period).mean() / atr)
+            
+            # Calculate DX
+            dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+            
+            # Calculate ADX
+            adx = dx.rolling(window=period).mean()
+            
+            return adx.iloc[-1] if not adx.empty else 0
+        
+        except Exception as e:
+            logger.error(f"Error calculating ADX: {e}")
+            return 0
+    
+    @staticmethod
+    def calculate_macd(series: pd.Series) -> Tuple[float, float, float]:
+        """
+        MACD (Moving Average Convergence Divergence)
+        Returns: (macd, signal, histogram)
+        """
+        try:
+            ema_12 = TechnicalIndicators.calculate_ema(series, 12)
+            ema_26 = TechnicalIndicators.calculate_ema(series, 26)
+            
+            macd = ema_12 - ema_26
+            signal = TechnicalIndicators.calculate_ema(macd, 9)
+            histogram = macd - signal
+            
+            return (
+                macd.iloc[-1] if not macd.empty else 0,
+                signal.iloc[-1] if not signal.empty else 0,
+                histogram.iloc[-1] if not histogram.empty else 0
+            )
+        except Exception as e:
+            logger.error(f"Error calculating MACD: {e}")
+            return (0, 0, 0)
+
+# ==================== PRICE ACTION ====================
+class PriceAction:
+    """Price Action analysis for trading signals"""
+    
+    @staticmethod
+    def find_supply_demand(df: pd.DataFrame, lookback: int = 50) -> Tuple[float, float]:
+        """
+        Find supply (resistance) and demand (support) zones
+        
+        Supply: Highest high in lookback period
+        Demand: Lowest low in lookback period
+        
+        Returns: (supply_level, demand_level)
+        """
+        try:
+            if len(df) < lookback:
+                return (df['high'].max(), df['low'].min())
+            
+            supply = df['high'].tail(lookback).max()
+            demand = df['low'].tail(lookback).min()
+            
+            return (supply, demand)
+        except Exception as e:
+            logger.error(f"Error finding supply/demand: {e}")
+            return (0, 0)
+    
+    @staticmethod
+    def detect_contraction_candle(candle: pd.Series) -> bool:
+        """
+        Detect contraction candle
+        
+        Characteristics:
+        - Small body (close - open)
+        - Long lower shadow (entry signal)
+        - Small upper shadow
+        """
+        try:
+            body = abs(candle['close'] - candle['open'])
+            lower_shadow = candle['open'] - candle['low']
+            upper_shadow = candle['high'] - candle['close']
+            total_range = candle['high'] - candle['low']
+            
+            # Contraction = body < 20% of range, lower shadow > 40% of range
+            if total_range == 0:
+                return False
+            
+            body_ratio = body / total_range
+            lower_shadow_ratio = lower_shadow / total_range
+            
+            is_contraction = (body_ratio < 0.25) and (lower_shadow_ratio > 0.3)
+            
+            return is_contraction
+        except Exception as e:
+            logger.error(f"Error detecting contraction: {e}")
+            return False
+    
+    @staticmethod
+    def detect_bos(df: pd.DataFrame, lookback: int = 20) -> Dict[str, bool]:
+        """
+        Detect Break of Structure (BOS)
+        
+        Bullish BOS: Price breaks above previous swing high
+        Bearish BOS: Price breaks below previous swing low
+        """
+        try:
+            if len(df) < lookback:
+                return {'bullish': False, 'bearish': False}
+            
+            current_high = df['high'].iloc[-1]
+            current_low = df['low'].iloc[-1]
+            
+            previous_high = df['high'].tail(lookback).max()
+            previous_low = df['low'].tail(lookback).min()
+            
+            bullish_bos = current_high > previous_high
+            bearish_bos = current_low < previous_low
+            
+            return {
+                'bullish': bullish_bos,
+                'bearish': bearish_bos,
+                'last_high': previous_high,
+                'last_low': previous_low
+            }
+        except Exception as e:
+            logger.error(f"Error detecting BOS: {e}")
+            return {'bullish': False, 'bearish': False}
+    
+    @staticmethod
+    def detect_order_block(df: pd.DataFrame, lookback: int = 5) -> Dict:
+        """
+        Detect Order Block (OB)
+        
+        Area where institutional orders likely placed
+        """
+        try:
+            if len(df) < lookback:
+                return {'found': False}
+            
+            # OB = zone where last impulse move started
+            recent = df.tail(lookback)
+            
+            ob_high = recent['high'].max()
+            ob_low = recent['low'].min()
+            ob_mid = (ob_high + ob_low) / 2
+            
+            return {
+                'found': True,
+                'high': ob_high,
+                'low': ob_low,
+                'mid': ob_mid
+            }
+        except Exception as e:
+            logger.error(f"Error detecting OB: {e}")
+            return {'found': False}
+
+# ==================== CONFLUENCE ANALYZER ====================
+class ConfluenceAnalyzer:
+    """Analyze multiple confluence levels for signal quality"""
+    
+    @staticmethod
+    def analyze_confluence(
+        symbol: str,
+        df_4h: pd.DataFrame,
+        df_1h: pd.DataFrame,
+        df_15m: pd.DataFrame,
+        supply_4h: float,
+        demand_4h: float
+    ) -> float:
+        """
+        Analyze confluence zones
+        
+        Confluence = Multiple indicators at same level
+        
+        Scoring:
+        - Fibonacci level + OB + previous swing = high confluence
+        - Only OB or only Fibonacci = medium
+        - No confluence = low (< 60%)
+        """
+        
+        confluence_score = 0
+        confluence_levels = []
+        
+        try:
+            price_4h = df_4h['close'].iloc[-1]
+            price_1h = df_1h['close'].iloc[-1]
+            price_15m = df_15m['close'].iloc[-1]
+            
+            # ===== 1. FIBONACCI LEVELS =====
+            fib_levels = ConfluenceAnalyzer._calculate_fibonacci(df_4h)
+            current_price = price_15m
+            
+            for fib_name, fib_level in fib_levels.items():
+                if abs(current_price - fib_level) / current_price < 0.02:  # Within 2%
+                    confluence_score += 15
+                    confluence_levels.append(f"Fibonacci {fib_name}")
+            
+            # ===== 2. ORDER BLOCK (OB) =====
+            ob_4h = PriceAction.detect_order_block(df_4h)
+            if ob_4h['found']:
+                if ob_4h['low'] <= current_price <= ob_4h['high']:
+                    confluence_score += 20
+                    confluence_levels.append("Order Block (4H)")
+            
+            # ===== 3. PREVIOUS SWING =====
+            swing_high = df_4h['high'].tail(10).max()
+            swing_low = df_4h['low'].tail(10).min()
+            
+            if abs(current_price - swing_high) / current_price < 0.03:  # Within 3%
+                confluence_score += 15
+                confluence_levels.append("Swing High")
+            
+            if abs(current_price - swing_low) / current_price < 0.03:
+                confluence_score += 15
+                confluence_levels.append("Swing Low")
+            
+            # ===== 4. MOVING AVERAGES =====
+            ema_20 = TechnicalIndicators.calculate_ema(df_4h['close'], 20).iloc[-1]
+            if abs(current_price - ema_20) / current_price < 0.02:
+                confluence_score += 10
+                confluence_levels.append("EMA 20 (4H)")
+            
+            # ===== 5. SUPPLY/DEMAND ZONE =====
+            if abs(current_price - demand_4h) / current_price < 0.03:
+                confluence_score += 20
+                confluence_levels.append("Demand Zone (4H)")
+            
+            if abs(current_price - supply_4h) / current_price < 0.03:
+                confluence_score += 20
+                confluence_levels.append("Supply Zone (4H)")
+            
+            # Cap at 100
+            confluence_score = min(confluence_score, 100)
+            
+            logger.info(f"{symbol} Confluence: {confluence_score:.0f}% - {confluence_levels}")
+            
+            return confluence_score
+        
+        except Exception as e:
+            logger.error(f"Error analyzing confluence for {symbol}: {e}")
+            return 50  # Default medium score
+    
+    @staticmethod
+    def _calculate_fibonacci(df: pd.DataFrame) -> Dict[str, float]:
+        """Calculate Fibonacci levels"""
+        try:
+            high = df['high'].tail(50).max()
+            low = df['low'].tail(50).min()
+            
+            range_val = high - low
+            
+            return {
+                '0.618': low + range_val * 0.618,
+                '0.5': low + range_val * 0.5,
+                '0.382': low + range_val * 0.382
+            }
+        except:
             return {}
-        
-        # Bitget format: [timestamp, open, high, low, close, volume, quote_asset_volume]
-        return {
-            'timestamp': int(klines[0]),
-            'open': float(klines[1]),
-            'high': float(klines[2]),
-            'low': float(klines[3]),
-            'close': float(klines[4]),
-            'volume': float(klines[5]),
-            'quote_asset_volume': float(klines[6]) if len(klines) > 6 else 0,
-        }
-    
-    @staticmethod
-    def batch_parse_klines(klines_list: List) -> List[Dict]:
-        """Parse multiple klines"""
-        return [DataProcessor.parse_klines(k) for k in klines_list]
-    
-    @staticmethod
-    def extract_ohlcv(klines_list: List[Dict]) -> Tuple:
-        """Extract OHLCV from parsed klines"""
-        opens = [k['open'] for k in klines_list]
-        highs = [k['high'] for k in klines_list]
-        lows = [k['low'] for k in klines_list]
-        closes = [k['close'] for k in klines_list]
-        volumes = [k['volume'] for k in klines_list]
-        
-        return opens, highs, lows, closes, volumes
-    
-    @staticmethod
-    def fill_gaps(data: List[float], method: str = 'linear') -> List[float]:
-        """Fill NaN gaps in data"""
-        series = pd.Series(data)
-        
-        if method == 'linear':
-            filled = series.interpolate(method='linear')
-        elif method == 'forward':
-            filled = series.fillna(method='ffill')
-        elif method == 'backward':
-            filled = series.fillna(method='bfill')
-        else:
-            filled = series
-        
-        return filled.fillna(series.mean()).tolist()
 
-# ============================================================================
-# RISK CALCULATIONS
-# ============================================================================
-
+# ==================== RISK CALCULATIONS ====================
 class RiskCalculations:
-    """Position and risk calculations"""
+    """Risk management calculations"""
     
     @staticmethod
-    def calculate_position_size(entry: float, stop_loss: float, 
-                               risk_amount: float, leverage: int = 1) -> float:
+    def calculate_position_size(
+        account_balance: float,
+        risk_per_trade: float,
+        entry: float,
+        sl: float,
+        leverage: int = 10
+    ) -> float:
         """
         Calculate position size based on risk
         
-        Args:
-            entry: Entry price
-            stop_loss: Stop loss price
-            risk_amount: Risk amount in USD
-            leverage: Trading leverage
-        
-        Returns:
-            Position size in base currency
+        Formula:
+        Position Size = (Risk Amount / Price Diff) * Leverage
         """
-        price_risk = abs(entry - stop_loss)
-        if price_risk == 0:
+        try:
+            price_diff = abs(entry - sl)
+            if price_diff == 0:
+                return 0
+            
+            position_value = (risk_per_trade / price_diff) * leverage
+            return position_value
+        except Exception as e:
+            logger.error(f"Error calculating position size: {e}")
             return 0
-        
-        # Position size = (Risk amount × Leverage) / Price risk
-        position_size = (risk_amount * leverage) / price_risk
-        return round(position_size, 4)
     
     @staticmethod
-    def calculate_take_profit(entry: float, stop_loss: float, 
-                             ratio: float) -> float:
+    def calculate_risk_reward(entry: float, sl: float, tp: float) -> float:
         """
-        Calculate take profit based on risk:reward ratio
+        Calculate Risk/Reward ratio
         
-        Args:
-            entry: Entry price
-            stop_loss: Stop loss price
-            ratio: RR ratio (e.g., 2 for 1:2)
-        
-        Returns:
-            Take profit price
+        Returns: RR ratio (e.g., 2.0 for 1:2)
         """
-        risk = abs(entry - stop_loss)
-        reward = risk * ratio
-        
-        if entry > stop_loss:  # Long
-            return entry + reward
-        else:  # Short
-            return entry - reward
-    
-    @staticmethod
-    def calculate_risk_reward_ratio(entry: float, take_profit: float, 
-                                   stop_loss: float) -> float:
-        """Calculate actual RR ratio"""
-        risk = abs(entry - stop_loss)
-        reward = abs(take_profit - entry)
-        
-        if risk == 0:
+        try:
+            risk = abs(entry - sl)
+            reward = abs(tp - entry)
+            
+            if risk == 0:
+                return 0
+            
+            return reward / risk
+        except Exception as e:
+            logger.error(f"Error calculating RR: {e}")
             return 0
-        
-        return reward / risk
-    
-    @staticmethod
-    def calculate_pnl(entry: float, exit_: float, 
-                     position_size: float, leverage: int = 1) -> float:
-        """Calculate profit/loss in USD"""
-        price_change = exit_ - entry
-        pnl = price_change * position_size / leverage
-        return round(pnl, 2)
-    
-    @staticmethod
-    def calculate_pnl_percent(entry: float, exit_: float) -> float:
-        """Calculate P&L percentage"""
-        if entry == 0:
-            return 0
-        return ((exit_ - entry) / entry) * 100
-
-# ============================================================================
-# TIME UTILITIES
-# ============================================================================
-
-class TimeUtils:
-    """Time and date utilities"""
-    
-    @staticmethod
-    def get_candle_start_time(timeframe_minutes: int) -> datetime:
-        """Get start time of current candle"""
-        now = datetime.utcnow()
-        minutes_since_hour = now.minute % timeframe_minutes
-        
-        return now.replace(
-            minute=now.minute - minutes_since_hour,
-            second=0,
-            microsecond=0
-        )
-    
-    @staticmethod
-    def get_candle_end_time(timeframe_minutes: int) -> datetime:
-        """Get end time of current candle"""
-        start = TimeUtils.get_candle_start_time(timeframe_minutes)
-        return start + timedelta(minutes=timeframe_minutes)
-    
-    @staticmethod
-    def time_until_next_candle(timeframe_minutes: int) -> int:
-        """Get seconds until next candle"""
-        end = TimeUtils.get_candle_end_time(timeframe_minutes)
-        delta = end - datetime.utcnow()
-        return int(delta.total_seconds())
-
-# ============================================================================
-# BITGET API SIGNATURE
-# ============================================================================
-
-class BitgetSignature:
-    """Bitget API authentication"""
-    
-    @staticmethod
-    def create_signature(timestamp: str, method: str, path: str, 
-                        body: str, secret: str) -> str:
-        """Create Bitget v2 API signature"""
-        message = timestamp + method.upper() + path
-        if body:
-            message += body
-        
-        signature = b64encode(
-            hmac.new(
-                secret.encode(),
-                message.encode(),
-                hashlib.sha256
-            ).digest()
-        ).decode()
-        
-        return signature
-
-# ============================================================================
-# LOGGING UTILITIES
-# ============================================================================
-
-class LogUtils:
-    """Logging helpers"""
-    
-    @staticmethod
-    def format_trade_log(symbol: str, side: str, entry: float, 
-                        sl: float, tp: float, size: float) -> str:
-        """Format trade information for logging"""
-        return (
-            f"{symbol} | {side.upper()} | "
-            f"Entry: {entry:.8f} | "
-            f"SL: {sl:.8f} | "
-            f"TP: {tp:.8f} | "
-            f"Size: {size:.4f}"
-        )
-    
-    @staticmethod
-    def format_pnl_log(symbol: str, entry: float, exit_: float, 
-                      pnl: float, pnl_percent: float) -> str:
-        """Format P&L information for logging"""
-        return (
-            f"{symbol} | "
-            f"Entry: {entry:.8f} | "
-            f"Exit: {exit_:.8f} | "
-            f"P&L: ${pnl:.2f} ({pnl_percent:+.2f}%)"
-        )
-
-if __name__ == '__main__':
-    print("🔧 Utilities Module")
-    print("=" * 50)
-    
-    # Test indicators
-    test_data = [100, 101, 102, 101, 103, 104, 103, 105, 106, 105]
-    
-    ema_result = TechnicalIndicators.ema(test_data, 5)
-    print(f"EMA(5): {ema_result[-1]:.2f}")
-    
-    rsi_result = TechnicalIndicators.rsi(test_data, 5)
-    print(f"RSI(5): {rsi_result[-1]:.2f}")
-    
-    # Test risk calculation
-    entry = 100
-    sl = 95
-    risk = 20
-    pos_size = RiskCalculations.calculate_position_size(entry, sl, risk, leverage=10)
-    print(f"\nPosition Size: {pos_size:.4f}")
-    
-    tp = RiskCalculations.calculate_take_profit(entry, sl, 2)
-    print(f"TP (1:2): {tp:.2f}")
-    
-    print("\n✅ Utilities module loaded successfully")
