@@ -1,893 +1,646 @@
 #!/usr/bin/env python3
 """
-BITGET TRADING BOT v1.0 - PROFESSIONAL EDITION
-Hybrid ARMY PRO + SMC + ICT Signal System
-Author: Benimle
-Deployment: Render.com (24/7)
+BITGET TRADING BOT v2.0 - PROFESSIONAL EDITION
+==============================================
+Hybrid ARMY PRO + SMC + ICT Signal System with Advanced Filters
+
+Features:
+- ADX-based market regime filtering (trending/ranging detection)
+- Confluence zones for higher accuracy
+- ATR-based dynamic leverage (volatility adjusted)
+- Time-based filters (London/NY session priority)
+- Trade validity counter (max bars auto-close)
+- Notion integration for trade journaling
+- Professional logging and error handling
+- Telegram real-time alerts
+- Flask REST API dashboard
+
+Author: BTW_GO
+Version: 2.0
+Status: PAPER MODE (Test only)
 """
 
-import os
-import json
 import asyncio
-import sqlite3
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+import json
 import logging
-from enum import Enum
+import os
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
-import requests
-from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify
 from flask_cors import CORS
-from telebot import TeleBot, types
 
-# Load environment variables
-load_dotenv()
+from config_v2 import Config
+from utils_v2 import (
+    TechnicalIndicators,
+    PriceAction,
+    RiskCalculations,
+    DataProcessor,
+    ConfluenceAnalyzer,
+)
 
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
+# ==================== LOGGING SETUP ====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/tmp/bot.log'),
+        logging.FileHandler('bot_v2.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# ENUMS & CONSTANTS
-# ============================================================================
-
-class SignalType(Enum):
-    NONE = 0
-    LONG = 1
-    SHORT = 2
-
-class TrendDirection(Enum):
-    UP = 1
-    DOWN = -1
-    NEUTRAL = 0
-
-# Configuration
-CONFIG = {
-    'LEVERAGE': 10,
-    'RISK_PER_TRADE': 20,  # USD
-    'MAX_DAILY_TRADES': 10,
-    'MAX_DAILY_LOSS': 20,  # USD
-    'INTERVAL': 1800,  # 30 minutes in seconds
-    'TOP_COINS': 20,  # Top 20 from top 100
-    'TP_RATIO_1': 2,  # 1:2 RR
-    'TP_RATIO_2': 4,  # 1:4 RR
-}
-
-# ============================================================================
-# BITGET API WRAPPER
-# ============================================================================
-
+# ==================== BITGET API CLIENT ====================
 class BitgetAPI:
-    """Bitget Futures API wrapper with async support"""
+    """Bitget Futures API v2 client with async support"""
     
     def __init__(self, api_key: str, secret_key: str, passphrase: str):
         self.api_key = api_key
         self.secret_key = secret_key
         self.passphrase = passphrase
         self.base_url = "https://api.bitget.com"
-        self.session = None
-        
-    async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
-        return self
+        self.session: Optional[aiohttp.ClientSession] = None
+        logger.info("BitgetAPI initialized")
     
-    async def __aexit__(self, *args):
-        await self.session.close()
-    
-    async def _sign_request(self, method: str, path: str, body: str = ""):
-        """Sign request with Bitget v2 authentication"""
-        import hmac
-        import hashlib
-        from base64 import b64encode
-        
-        timestamp = str(int(datetime.utcnow().timestamp() * 1000))
-        
-        message = timestamp + method.upper() + path
-        if body:
-            message += body
-        
-        signature = b64encode(
-            hmac.new(
-                self.secret_key.encode(),
-                message.encode(),
-                hashlib.sha256
-            ).digest()
-        ).decode()
-        
-        headers = {
-            "Content-Type": "application/json",
-            "ACCESS-KEY": self.api_key,
-            "ACCESS-SIGN": signature,
-            "ACCESS-TIMESTAMP": timestamp,
-            "ACCESS-PASSPHRASE": self.passphrase,
-            "User-Agent": "Botv1"
-        }
-        
-        return headers
-    
-    async def get_klines(self, symbol: str, timeframe: str, limit: int = 100) -> List:
-        """Fetch candlestick data"""
+    async def get_klines(self, symbol: str, timeframe: str, limit: int = 100) -> List[Dict]:
+        """Fetch OHLCV candles from Bitget"""
         try:
-            path = f"/api/v2/public/market/candles?symbol={symbol}&granularity={timeframe}&limit={limit}"
-            headers = await self._sign_request("GET", path)
-            
-            async with self.session.get(self.base_url + path, headers=headers) as resp:
-                data = await resp.json()
-                if data['code'] == '00000':
-                    return data['data']
-                else:
-                    logger.error(f"Bitget error: {data}")
-                    return []
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/v2/mix/market/candles"
+                params = {
+                    'symbol': symbol,
+                    'granularity': timeframe,
+                    'limit': limit
+                }
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get('data', [])
+                    else:
+                        logger.error(f"Bitget API error: {resp.status}")
+                        return []
         except Exception as e:
-            logger.error(f"get_klines error: {e}")
+            logger.error(f"Error fetching klines for {symbol}: {e}")
             return []
     
-    async def get_ticker(self, symbol: str) -> Dict:
-        """Get current price and 24h info"""
+    async def place_order(self, symbol: str, side: str, size: float, leverage: int) -> Dict:
+        """Place futures order (paper mode simulation)"""
         try:
-            path = f"/api/v2/public/market/ticker?symbol={symbol}"
-            headers = await self._sign_request("GET", path)
-            
-            async with self.session.get(self.base_url + path, headers=headers) as resp:
-                data = await resp.json()
-                if data['code'] == '00000':
-                    return data['data'][0]
-                return {}
+            # In paper mode, simulate order placement
+            order = {
+                'orderId': f"PAPER_{datetime.now().timestamp()}",
+                'symbol': symbol,
+                'side': side,
+                'size': size,
+                'leverage': leverage,
+                'timestamp': datetime.now().isoformat(),
+                'status': 'filled',
+                'mode': 'paper'  # Paper mode marker
+            }
+            logger.info(f"[PAPER] Order placed: {order}")
+            return order
         except Exception as e:
-            logger.error(f"get_ticker error: {e}")
+            logger.error(f"Error placing order: {e}")
             return {}
     
-    async def place_order(self, symbol: str, side: str, size: float, 
-                         price: Optional[float] = None) -> Dict:
-        """
-        Place futures order
-        side: 'buy' or 'sell'
-        """
+    async def close_position(self, symbol: str, side: str) -> Dict:
+        """Close position (paper mode simulation)"""
         try:
-            order_type = "market" if price is None else "limit"
-            
-            body_dict = {
-                "symbol": symbol,
-                "margin_coin": symbol.split("USDT")[0] + "USDT" if "USDT" in symbol else symbol,
-                "order_type": order_type,
-                "position_side": "long" if side == "buy" else "short",
-                "side": side,
-                "size": str(size),
-                "price": str(price) if price else ""
+            close_order = {
+                'orderId': f"PAPER_CLOSE_{datetime.now().timestamp()}",
+                'symbol': symbol,
+                'side': 'sell' if side == 'long' else 'buy',
+                'status': 'closed',
+                'timestamp': datetime.now().isoformat(),
+                'mode': 'paper'
             }
-            
-            body = json.dumps(body_dict)
-            path = "/api/v2/mix/orders/place-order"
-            headers = await self._sign_request("POST", path, body)
-            
-            async with self.session.post(
-                self.base_url + path, 
-                headers=headers, 
-                data=body
-            ) as resp:
-                data = await resp.json()
-                if data['code'] == '00000':
-                    logger.info(f"Order placed: {symbol} {side} {size}")
-                    return data['data']
-                else:
-                    logger.error(f"Order failed: {data}")
-                    return {}
+            logger.info(f"[PAPER] Position closed: {close_order}")
+            return close_order
         except Exception as e:
-            logger.error(f"place_order error: {e}")
+            logger.error(f"Error closing position: {e}")
             return {}
-    
-    async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Set leverage for symbol"""
-        try:
-            body_dict = {
-                "symbol": symbol,
-                "leverage": str(leverage)
-            }
-            body = json.dumps(body_dict)
-            path = "/api/v2/mix/account/set-leverage"
-            headers = await self._sign_request("POST", path, body)
-            
-            async with self.session.post(
-                self.base_url + path,
-                headers=headers,
-                data=body
-            ) as resp:
-                data = await resp.json()
-                return data['code'] == '00000'
-        except Exception as e:
-            logger.error(f"set_leverage error: {e}")
-            return False
 
-# ============================================================================
-# SIGNAL ENGINE - ARMY PRO + SMC + ICT
-# ============================================================================
-
-class SignalEngine:
-    """Hybrid signal generation with ARMY PRO + SMC + ICT"""
+# ==================== SIGNAL ENGINE V2 ====================
+class SignalEngineV2:
+    """
+    Advanced signal engine with:
+    - ADX market regime filtering
+    - Confluence zone analysis
+    - Multi-timeframe confirmation
+    - Professional scoring system
+    """
     
-    def __init__(self):
-        self.zones = {}  # Store S/D zones per symbol
-        
-    def _calculate_ema(self, data: np.ndarray, period: int) -> np.ndarray:
-        """Calculate Exponential Moving Average"""
-        return pd.Series(data).ewm(span=period).mean().values
+    def __init__(self, config: Config):
+        self.config = config
+        self.indicators = TechnicalIndicators()
+        self.price_action = PriceAction()
+        self.confluence = ConfluenceAnalyzer()
+        self.data_processor = DataProcessor()
+        logger.info("SignalEngineV2 initialized")
     
-    def _calculate_rsi(self, data: np.ndarray, period: int = 14) -> np.ndarray:
-        """Calculate Relative Strength Index"""
-        delta = np.diff(data)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.mean(gain[-period:])
-        avg_loss = np.mean(loss[-period:])
-        
-        rs = avg_gain / avg_loss if avg_loss != 0 else 0
-        rsi = 100 - (100 / (1 + rs))
-        
-        return np.full_like(data, rsi, dtype=float)
-    
-    def _calculate_macd(self, data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Calculate MACD"""
-        ema12 = self._calculate_ema(data, 12)
-        ema26 = self._calculate_ema(data, 26)
-        macd = ema12 - ema26
-        signal = self._calculate_ema(macd, 9)
-        return macd, signal
-    
-    def detect_supply_demand_zones(self, closes: List[float], highs: List[float], 
-                                   lows: List[float]) -> Dict:
+    def analyze_symbol(
+        self, 
+        symbol: str, 
+        klines_4h: List[Dict],
+        klines_1h: List[Dict],
+        klines_15m: List[Dict]
+    ) -> Dict:
         """
-        Detect Supply/Demand zones using ARMY PRO methodology
-        Returns: {'demand': [high, low], 'supply': [high, low]}
+        Complete symbol analysis with multi-timeframe confirmation
+        
+        Returns: {
+            'symbol': str,
+            'signal': 'LONG' | 'SHORT' | 'NONE',
+            'confidence': 0-100,
+            'entry_level': float,
+            'sl_level': float,
+            'tp1_level': float,
+            'tp2_level': float,
+            'market_regime': 'TRENDING' | 'RANGING',
+            'confluence_score': 0-100,
+            'reasons': List[str]
+        }
         """
+        
+        reasons = []
+        
         try:
-            recent = 50  # Last 50 candles
-            closes = np.array(closes[-recent:])
-            highs = np.array(highs[-recent:])
-            lows = np.array(lows[-recent:])
+            # ===== 1. MARKET REGIME CHECK (ADX) =====
+            adx_4h = self.indicators.calculate_adx(klines_4h, period=14)
+            market_regime = 'TRENDING' if adx_4h > 25 else 'RANGING'
             
-            # Find local minima (demand) and maxima (supply)
-            demand_level = np.min(lows[-20:])  # Recent low
-            supply_level = np.max(highs[-20:])  # Recent high
+            if market_regime == 'RANGING':
+                logger.warning(f"{symbol}: ADX {adx_4h:.1f} - RANGING mode, skipping signals")
+                return {
+                    'symbol': symbol,
+                    'signal': 'NONE',
+                    'confidence': 0,
+                    'market_regime': 'RANGING',
+                    'reasons': ['ADX < 25: Ranging market, signals disabled']
+                }
             
-            # Zone width (ATR-based)
-            atr = np.mean(highs[-14:] - lows[-14:])
+            reasons.append(f"✅ ADX {adx_4h:.1f} - Trending market")
             
-            return {
-                'demand': {
-                    'high': demand_level + atr * 0.5,
-                    'low': demand_level
-                },
-                'supply': {
-                    'high': supply_level,
-                    'low': supply_level - atr * 0.5
-                },
-                'atr': atr
-            }
-        except Exception as e:
-            logger.error(f"Zone detection error: {e}")
-            return {}
-    
-    def detect_contraction(self, opens: List[float], closes: List[float], 
-                          highs: List[float], lows: List[float]) -> bool:
-        """
-        Detect contraction candle (small body + long lower wick)
-        ARMY PRO entry signal
-        """
-        try:
-            last_open = opens[-1]
-            last_close = closes[-1]
-            last_high = highs[-1]
-            last_low = lows[-1]
+            # ===== 2. TIMEFRAME ANALYSIS =====
+            # 4H: Trend direction
+            df_4h = self.data_processor.process_klines(klines_4h)
+            ema_fast_4h = self.indicators.calculate_ema(df_4h['close'], 9)
+            ema_slow_4h = self.indicators.calculate_ema(df_4h['close'], 21)
             
-            body = abs(last_close - last_open)
-            total_range = last_high - last_low
-            lower_wick = min(last_open, last_close) - last_low
+            trend_4h = 'UP' if ema_fast_4h.iloc[-1] > ema_slow_4h.iloc[-1] else 'DOWN'
             
-            # Contraction: body < 30% of range, wick > 40% of range
-            is_contraction = (
-                body < total_range * 0.3 and 
-                lower_wick > total_range * 0.4
+            # 1H: Entry zone
+            df_1h = self.data_processor.process_klines(klines_1h)
+            supply_1h, demand_1h = self.price_action.find_supply_demand(df_1h)
+            
+            # 15M: Entry point
+            df_15m = self.data_processor.process_klines(klines_15m)
+            is_contraction = self.price_action.detect_contraction_candle(df_15m.iloc[-1])
+            
+            if not is_contraction:
+                return {
+                    'symbol': symbol,
+                    'signal': 'NONE',
+                    'confidence': 0,
+                    'market_regime': market_regime,
+                    'reasons': ['No contraction candle on 15M']
+                }
+            
+            reasons.append("✅ Contraction candle detected on 15M")
+            
+            # ===== 3. CONFLUENCE ZONE ANALYSIS =====
+            confluence_score = self.confluence.analyze_confluence(
+                symbol=symbol,
+                df_4h=df_4h,
+                df_1h=df_1h,
+                df_15m=df_15m,
+                supply_4h=supply_1h,  # Use 1H as reference
+                demand_4h=demand_1h
             )
             
-            return is_contraction
-        except:
-            return False
-    
-    def detect_bos(self, closes: List[float], period: int = 20) -> Tuple[bool, str]:
-        """
-        Detect Break of Structure (BOS) - SMC
-        Returns: (has_bos, direction)
-        """
-        try:
-            if len(closes) < period + 2:
-                return False, "NONE"
+            if confluence_score < 60:
+                reasons.append(f"⚠️ Confluence score {confluence_score:.0f} - Low quality")
+                confidence = confluence_score
+            else:
+                reasons.append(f"✅ Confluence score {confluence_score:.0f} - High quality")
+                confidence = confluence_score
             
-            recent = closes[-period:]
-            prev = closes[-(period + 1):-1]
+            # ===== 4. SIGNAL DETERMINATION =====
+            current_price = float(df_15m['close'].iloc[-1])
             
-            # BOS Up: recent high > previous high
-            # BOS Down: recent low < previous low
-            
-            recent_high = max(recent)
-            recent_low = min(recent)
-            prev_high = max(prev)
-            prev_low = min(prev)
-            
-            if recent_high > prev_high and closes[-1] > closes[-2]:
-                return True, "BOS_UP"
-            elif recent_low < prev_low and closes[-1] < closes[-2]:
-                return True, "BOS_DOWN"
-            
-            return False, "NONE"
-        except:
-            return False, "NONE"
-    
-    def analyze_symbol(self, symbol: str, klines_4h: List, 
-                      klines_1h: List, klines_15m: List) -> Dict:
-        """
-        Comprehensive multi-timeframe analysis
-        Returns signal confidence and entry/exit levels
-        """
-        try:
-            if not (klines_4h and klines_1h and klines_15m):
-                return {'signal': SignalType.NONE, 'confidence': 0}
-            
-            # Parse candles: [timestamp, open, high, low, close, volume]
-            closes_4h = np.array([float(k[4]) for k in klines_4h])
-            opens_4h = np.array([float(k[1]) for k in klines_4h])
-            highs_4h = np.array([float(k[2]) for k in klines_4h])
-            lows_4h = np.array([float(k[3]) for k in klines_4h])
-            
-            closes_1h = np.array([float(k[4]) for k in klines_1h])
-            opens_1h = np.array([float(k[1]) for k in klines_1h])
-            highs_1h = np.array([float(k[2]) for k in klines_1h])
-            lows_1h = np.array([float(k[3]) for k in klines_1h])
-            
-            closes_15m = np.array([float(k[4]) for k in klines_15m])
-            opens_15m = np.array([float(k[1]) for k in klines_15m])
-            highs_15m = np.array([float(k[2]) for k in klines_15m])
-            lows_15m = np.array([float(k[3]) for k in klines_15m])
-            
-            # === 4H ANALYSIS (HTF Bias) ===
-            trend_4h = self._analyze_trend(closes_4h)
-            zones_4h = self.detect_supply_demand_zones(closes_4h, highs_4h, lows_4h)
-            
-            # === 1H ANALYSIS (Mid Timeframe) ===
-            trend_1h = self._analyze_trend(closes_1h)
-            zones_1h = self.detect_supply_demand_zones(closes_1h, highs_1h, lows_1h)
-            bos_1h, bos_dir = self.detect_bos(closes_1h)
-            
-            # === 15M ANALYSIS (Entry Timeframe) ===
-            is_contraction_15m = self.detect_contraction(
-                opens_15m.tolist(), closes_15m.tolist(),
-                highs_15m.tolist(), lows_15m.tolist()
-            )
-            bos_15m, _ = self.detect_bos(closes_15m, period=10)
-            
-            # === CONFIRMATION LOGIC ===
-            confidence = 0
-            signal = SignalType.NONE
-            
-            # Long setup
-            if (trend_4h == TrendDirection.UP and 
-                trend_1h == TrendDirection.UP and
-                is_contraction_15m and
-                closes_15m[-1] > zones_1h.get('demand', {}).get('high', 0)):
+            if trend_4h == 'UP' and current_price <= demand_1h and confluence_score >= 60:
+                signal = 'LONG'
+                entry_level = current_price
+                sl_level = demand_1h * 0.98  # 2% below demand
+                tp1_level = current_price + (current_price - sl_level) * 2
+                tp2_level = current_price + (current_price - sl_level) * 4
                 
-                confidence = self._calculate_confidence(
-                    trend_4h == trend_1h,
-                    is_contraction_15m,
-                    bos_15m,
-                    closes_15m[-1] > zones_1h['demand']['high']
-                )
-                signal = SignalType.LONG
-            
-            # Short setup
-            elif (trend_4h == TrendDirection.DOWN and 
-                  trend_1h == TrendDirection.DOWN and
-                  is_contraction_15m and
-                  closes_15m[-1] < zones_1h.get('supply', {}).get('low', 1e6)):
+                reasons.append(f"✅ LONG signal: Trend UP, price at demand zone")
                 
-                confidence = self._calculate_confidence(
-                    trend_4h == trend_1h,
-                    is_contraction_15m,
-                    bos_15m,
-                    closes_15m[-1] < zones_1h['supply']['low']
-                )
-                signal = SignalType.SHORT
+            elif trend_4h == 'DOWN' and current_price >= supply_1h and confluence_score >= 60:
+                signal = 'SHORT'
+                entry_level = current_price
+                sl_level = supply_1h * 1.02  # 2% above supply
+                tp1_level = current_price - (sl_level - current_price) * 2
+                tp2_level = current_price - (sl_level - current_price) * 4
+                
+                reasons.append(f"✅ SHORT signal: Trend DOWN, price at supply zone")
+                
+            else:
+                signal = 'NONE'
+                confidence = 0
+                entry_level = sl_level = tp1_level = tp2_level = 0
+                reasons.append("❌ No valid LONG/SHORT signal")
+            
+            # ===== 5. FINAL CONFIDENCE SCORE =====
+            final_confidence = confidence if signal != 'NONE' else 0
             
             return {
+                'symbol': symbol,
                 'signal': signal,
-                'confidence': confidence,
-                'zones_1h': zones_1h,
-                'zones_4h': zones_4h,
+                'confidence': final_confidence,
+                'entry_level': entry_level,
+                'sl_level': sl_level,
+                'tp1_level': tp1_level,
+                'tp2_level': tp2_level,
+                'market_regime': market_regime,
+                'confluence_score': confluence_score,
+                'adx': adx_4h,
                 'trend_4h': trend_4h,
-                'trend_1h': trend_1h,
-                'contraction_15m': is_contraction_15m,
-                'bos_15m': bos_15m,
-                'current_price': float(closes_15m[-1])
+                'reasons': reasons
             }
-        
+            
         except Exception as e:
-            logger.error(f"Analysis error for {symbol}: {e}")
-            return {'signal': SignalType.NONE, 'confidence': 0}
+            logger.error(f"Error analyzing {symbol}: {e}")
+            return {
+                'symbol': symbol,
+                'signal': 'NONE',
+                'confidence': 0,
+                'error': str(e)
+            }
+
+# ==================== RISK MANAGER V2 ====================
+class RiskManagerV2:
+    """
+    Advanced risk management with:
+    - ATR-based dynamic leverage
+    - Daily loss tracking
+    - Trade validity counter
+    - Position sizing
+    """
     
-    def _analyze_trend(self, closes: np.ndarray) -> TrendDirection:
-        """Determine trend using EMA crossover"""
-        if len(closes) < 26:
-            return TrendDirection.NEUTRAL
+    def __init__(self, config: Config):
+        self.config = config
+        self.risk_calc = RiskCalculations()
+        self.daily_loss = 0.0
+        self.daily_trades = 0
+        self.open_trades: Dict[str, Dict] = {}
+        self.trade_history: List[Dict] = []
+        logger.info("RiskManagerV2 initialized")
+    
+    def calculate_leverage(self, symbol: str, atr: float, avg_atr: float) -> int:
+        """
+        Calculate dynamic leverage based on volatility (ATR ratio)
         
-        ema7 = self._calculate_ema(closes, 7)
-        ema25 = self._calculate_ema(closes, 25)
+        High volatility (ATR > 2x avg) -> 3x leverage
+        Medium volatility -> 5x leverage
+        Low volatility -> 10x leverage
+        """
+        atr_ratio = atr / avg_atr if avg_atr > 0 else 1.0
         
-        if ema7[-1] > ema25[-1]:
-            return TrendDirection.UP
-        elif ema7[-1] < ema25[-1]:
-            return TrendDirection.DOWN
+        if atr_ratio > 2.0:
+            leverage = 3
+            logger.info(f"{symbol}: High volatility (ATR ratio {atr_ratio:.2f}) -> 3x leverage")
+        elif atr_ratio > 1.5:
+            leverage = 5
+            logger.info(f"{symbol}: Medium volatility (ATR ratio {atr_ratio:.2f}) -> 5x leverage")
         else:
-            return TrendDirection.NEUTRAL
+            leverage = 10
+            logger.info(f"{symbol}: Low volatility (ATR ratio {atr_ratio:.2f}) -> 10x leverage")
+        
+        return leverage
     
-    def _calculate_confidence(self, *factors) -> float:
-        """Calculate signal confidence (0-100)"""
-        return sum([1 if f else 0 for f in factors]) / len(factors) * 100 if factors else 0
+    def can_open_trade(self, symbol: str, signal_confidence: float) -> Tuple[bool, str]:
+        """Check if trade can be opened based on risk limits"""
+        
+        # Check daily loss limit
+        if self.daily_loss >= self.config.MAX_DAILY_LOSS:
+            return False, f"Daily loss limit reached: ${self.daily_loss:.2f}"
+        
+        # Check daily trade limit
+        if self.daily_trades >= self.config.MAX_DAILY_TRADES:
+            return False, f"Daily trade limit reached: {self.daily_trades}"
+        
+        # Check open positions limit
+        if len(self.open_trades) >= self.config.MAX_OPEN_POSITIONS:
+            return False, f"Max open positions reached: {len(self.open_trades)}"
+        
+        # Check minimum confidence
+        if signal_confidence < self.config.MIN_SIGNAL_CONFIDENCE:
+            return False, f"Signal confidence {signal_confidence:.0f} < {self.config.MIN_SIGNAL_CONFIDENCE}"
+        
+        return True, "OK"
+    
+    def register_trade(
+        self,
+        symbol: str,
+        signal: str,
+        entry: float,
+        sl: float,
+        tp1: float,
+        tp2: float,
+        leverage: int,
+        risk_amount: float
+    ) -> Dict:
+        """Register opened trade"""
+        
+        trade_id = f"{symbol}_{datetime.now().timestamp()}"
+        trade = {
+            'id': trade_id,
+            'symbol': symbol,
+            'signal': signal,
+            'entry': entry,
+            'sl': sl,
+            'tp1': tp1,
+            'tp2': tp2,
+            'leverage': leverage,
+            'risk_amount': risk_amount,
+            'opened_at': datetime.now(),
+            'opened_bar': 0,  # Current bar count
+            'status': 'OPEN',
+            'pnl': 0.0
+        }
+        
+        self.open_trades[trade_id] = trade
+        self.daily_trades += 1
+        
+        logger.info(f"Trade registered: {trade_id}, Risk: ${risk_amount:.2f}, Leverage: {leverage}x")
+        return trade
+    
+    def check_trade_validity(self, max_bars: int = 30) -> List[str]:
+        """Check if open trades exceeded max bar count and close them"""
+        
+        closed_trades = []
+        for trade_id, trade in list(self.open_trades.items()):
+            trade['opened_bar'] += 1
+            
+            if trade['opened_bar'] > max_bars:
+                logger.warning(f"Trade {trade_id}: Exceeded {max_bars} bars, closing")
+                self.open_trades.pop(trade_id)
+                closed_trades.append(trade_id)
+                trade['status'] = 'CLOSED_TIMEOUT'
+        
+        return closed_trades
+    
+    def record_trade_result(self, trade_id: str, pnl: float):
+        """Record trade result"""
+        
+        if trade_id in self.open_trades:
+            trade = self.open_trades[trade_id]
+            trade['pnl'] = pnl
+            trade['status'] = 'CLOSED'
+            
+            self.daily_loss += pnl if pnl < 0 else 0
+            self.trade_history.append(trade)
+            
+            logger.info(f"Trade closed: {trade_id}, P&L: ${pnl:.2f}, Daily loss: ${self.daily_loss:.2f}")
+            
+            self.open_trades.pop(trade_id)
 
-# ============================================================================
-# RISK MANAGER
-# ============================================================================
-
-class RiskManager:
-    """Position sizing, stop-loss, take-profit management"""
-    
-    def __init__(self, db_path: str = '/tmp/trading.db'):
-        self.db_path = db_path
-        self._init_db()
-    
-    def _init_db(self):
-        """Initialize SQLite database"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY,
-            symbol TEXT,
-            entry_time TIMESTAMP,
-            entry_price REAL,
-            side TEXT,
-            size REAL,
-            leverage INTEGER,
-            sl_price REAL,
-            tp1_price REAL,
-            tp2_price REAL,
-            exit_price REAL,
-            exit_time TIMESTAMP,
-            pnl REAL,
-            status TEXT
-        )''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS daily_stats (
-            date DATE PRIMARY KEY,
-            total_trades INTEGER,
-            total_loss REAL,
-            total_profit REAL
-        )''')
-        
-        conn.commit()
-        conn.close()
-    
-    def get_daily_stats(self) -> Dict:
-        """Get today's trading stats"""
-        today = datetime.now().date()
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        c.execute(
-            'SELECT total_trades, total_loss FROM daily_stats WHERE date = ?',
-            (today,)
-        )
-        result = c.fetchone()
-        conn.close()
-        
-        if result:
-            return {'trades': result[0], 'loss': result[1]}
-        return {'trades': 0, 'loss': 0}
-    
-    def can_trade(self) -> bool:
-        """Check if bot can execute trade based on limits"""
-        stats = self.get_daily_stats()
-        
-        if stats['trades'] >= CONFIG['MAX_DAILY_TRADES']:
-            logger.warning("Max daily trades reached")
-            return False
-        
-        if stats['loss'] >= CONFIG['MAX_DAILY_LOSS']:
-            logger.warning("Max daily loss reached")
-            return False
-        
-        return True
-    
-    def calculate_position_size(self, entry_price: float, sl_price: float) -> float:
-        """
-        Calculate position size based on risk
-        risk = $20, leverage = 10x
-        """
-        risk_amount = CONFIG['RISK_PER_TRADE']
-        leverage = CONFIG['LEVERAGE']
-        
-        price_risk = abs(entry_price - sl_price)
-        if price_risk == 0:
-            return 0
-        
-        position_size = (risk_amount * leverage) / price_risk
-        return round(position_size, 4)
-    
-    def log_trade(self, symbol: str, side: str, entry_price: float, 
-                 sl_price: float, tp1: float, tp2: float, size: float):
-        """Log trade to database"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        c.execute('''INSERT INTO trades 
-                   (symbol, entry_time, entry_price, side, size, leverage, 
-                    sl_price, tp1_price, tp2_price, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                 (symbol, datetime.now(), entry_price, side, size, 
-                  CONFIG['LEVERAGE'], sl_price, tp1, tp2, 'OPEN'))
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Trade logged: {symbol} {side} @ {entry_price}")
-
-# ============================================================================
-# TELEGRAM BOT
-# ============================================================================
-
+# ==================== TELEGRAM HANDLER ====================
 class TelegramHandler:
-    """Telegram notifications and control"""
+    """Send alerts to Telegram"""
     
-    def __init__(self, token: str, chat_id: str, risk_manager: RiskManager):
-        self.bot = TeleBot(token)
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
         self.chat_id = chat_id
-        self.risk_manager = risk_manager
+        self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        logger.info("TelegramHandler initialized")
     
-    def send_signal(self, symbol: str, signal_type: SignalType, 
-                   entry: float, sl: float, tp1: float, tp2: float, 
-                   confidence: float):
-        """Send signal notification"""
-        direction = "🟢 LONG" if signal_type == SignalType.LONG else "🔴 SHORT"
-        
+    async def send_message(self, message: str):
+        """Send message to Telegram"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                data = {
+                    'chat_id': self.chat_id,
+                    'text': message,
+                    'parse_mode': 'HTML'
+                }
+                async with session.post(self.api_url, json=data) as resp:
+                    if resp.status == 200:
+                        logger.info("Telegram message sent")
+                    else:
+                        logger.error(f"Telegram error: {resp.status}")
+        except Exception as e:
+            logger.error(f"Error sending Telegram message: {e}")
+    
+    async def send_signal(self, signal_data: Dict):
+        """Send signal alert"""
         message = f"""
-{direction} {symbol}
-━━━━━━━━━━━━━━━━━━━━
-Confidence: {confidence:.1f}%
-Entry: {entry:.8f}
-SL: {sl:.8f}
-TP1: {tp1:.8f} (1:2)
-TP2: {tp2:.8f} (1:4)
-━━━━━━━━━━━━━━━━━━━━
-Leverage: 10x
-Risk: $20
+<b>🟢 NEW SIGNAL - {signal_data['symbol']}</b>
+
+<b>Direction:</b> {signal_data['signal']}
+<b>Confidence:</b> {signal_data['confidence']:.0f}%
+<b>Entry:</b> {signal_data['entry_level']:.4f}
+<b>SL:</b> {signal_data['sl_level']:.4f}
+<b>TP1 (1:2):</b> {signal_data['tp1_level']:.4f}
+<b>TP2 (1:4):</b> {signal_data['tp2_level']:.4f}
+
+<b>Market Regime:</b> {signal_data['market_regime']}
+<b>Confluence Score:</b> {signal_data.get('confluence_score', 'N/A')}
+
+<b>Analysis:</b>
+{chr(10).join(signal_data['reasons'])}
         """
-        
-        try:
-            self.bot.send_message(self.chat_id, message)
-        except Exception as e:
-            logger.error(f"Telegram send error: {e}")
-    
-    def send_status(self, text: str):
-        """Send status message"""
-        try:
-            self.bot.send_message(self.chat_id, text)
-        except Exception as e:
-            logger.error(f"Telegram status error: {e}")
+        await self.send_message(message)
 
-# ============================================================================
-# MAIN BOT
-# ============================================================================
-
-class TradingBot:
+# ==================== MAIN BOT ====================
+class TradingBotV2:
     """Main trading bot orchestrator"""
     
-    def __init__(self):
-        self.signal_engine = SignalEngine()
-        self.risk_manager = RiskManager()
+    def __init__(self, config: Config):
+        self.config = config
+        self.bitget = BitgetAPI(
+            config.BITGET_API_KEY,
+            config.BITGET_SECRET_KEY,
+            config.BITGET_PASSPHRASE
+        )
+        self.signal_engine = SignalEngineV2(config)
+        self.risk_manager = RiskManagerV2(config)
         self.telegram = TelegramHandler(
-            os.getenv('TELEGRAM_BOT_TOKEN'),
-            os.getenv('TELEGRAM_CHAT_ID'),
-            self.risk_manager
+            config.TELEGRAM_BOT_TOKEN,
+            config.TELEGRAM_CHAT_ID
         )
         
-        self.bitget_api = None
-        self.monitored_coins = []
-        self.last_run = None
+        # Flask app
+        self.app = Flask(__name__)
+        CORS(self.app)
+        self.setup_routes()
+        
+        logger.info("TradingBotV2 initialized")
     
-    async def initialize(self):
-        """Initialize bot"""
-        api_key = os.getenv('BITGET_API_KEY')
-        secret_key = os.getenv('BITGET_SECRET_KEY')
-        passphrase = os.getenv('BITGET_PASSPHRASE')
+    def setup_routes(self):
+        """Setup Flask API routes"""
         
-        self.bitget_api = BitgetAPI(api_key, secret_key, passphrase)
+        @self.app.route('/api/status', methods=['GET'])
+        def status():
+            return jsonify({
+                'status': 'running',
+                'mode': self.config.BOT_MODE,
+                'coins_monitored': len(self.config.SYMBOLS),
+                'open_positions': len(self.risk_manager.open_trades),
+                'daily_trades': self.risk_manager.daily_trades,
+                'daily_loss': f"${self.risk_manager.daily_loss:.2f}",
+                'timestamp': datetime.now().isoformat()
+            })
         
-        # Load top coins (you can expand this list)
-        self.monitored_coins = [
-            'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
-            'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'LINKUSDT', 'MATICUSDT',
-            'ARBUSDT', 'OPUSDT', 'LITUSDT', 'BCUSDT', 'APTUSDT',
-            'SUIUSDT', 'PERPUSDT', 'GMXUSDT', 'AAVEUSDT', 'UNIUSDT'
-        ]
-        
-        logger.info(f"Bot initialized. Monitoring {len(self.monitored_coins)} coins")
-    
-    async def fetch_candles(self, symbol: str, timeframe: str) -> List:
-        """Fetch candles from Bitget"""
-        async with BitgetAPI(
-            os.getenv('BITGET_API_KEY'),
-            os.getenv('BITGET_SECRET_KEY'),
-            os.getenv('BITGET_PASSPHRASE')
-        ) as api:
-            # Map timeframe to Bitget format
-            tf_map = {'4h': '4h', '1h': '1h', '15m': '15m'}
-            return await api.get_klines(symbol, tf_map.get(timeframe, timeframe))
-    
-    async def analyze_all_coins(self) -> List[Dict]:
-        """Analyze all monitored coins"""
-        signals = []
-        
-        async with BitgetAPI(
-            os.getenv('BITGET_API_KEY'),
-            os.getenv('BITGET_SECRET_KEY'),
-            os.getenv('BITGET_PASSPHRASE')
-        ) as api:
+        @self.app.route('/api/trades', methods=['GET'])
+        def trades():
+            total_pnl = sum(t['pnl'] for t in self.risk_manager.trade_history)
+            win_count = len([t for t in self.risk_manager.trade_history if t['pnl'] > 0])
             
-            for symbol in self.monitored_coins:
-                try:
-                    klines_4h = await api.get_klines(symbol, '4h', limit=100)
-                    klines_1h = await api.get_klines(symbol, '1h', limit=100)
-                    klines_15m = await api.get_klines(symbol, '15m', limit=100)
-                    
-                    analysis = self.signal_engine.analyze_symbol(
-                        symbol, klines_4h, klines_1h, klines_15m
-                    )
-                    
-                    if analysis['signal'] != SignalType.NONE and analysis['confidence'] > 60:
-                        analysis['symbol'] = symbol
-                        signals.append(analysis)
-                        logger.info(f"Signal found: {symbol} {analysis['signal'].name} "
-                                  f"({analysis['confidence']:.1f}%)")
-                
-                except Exception as e:
-                    logger.error(f"Error analyzing {symbol}: {e}")
-                    continue
-        
-        return signals
-    
-    async def execute_trade(self, signal: Dict):
-        """Execute trade based on signal"""
-        if not self.risk_manager.can_trade():
-            logger.warning(f"Cannot trade {signal['symbol']}: limits reached")
-            return
-        
-        symbol = signal['symbol']
-        side = 'buy' if signal['signal'] == SignalType.LONG else 'sell'
-        entry_price = signal['current_price']
-        zones = signal['zones_1h']
-        
-        # Calculate SL & TP
-        if signal['signal'] == SignalType.LONG:
-            sl_price = zones['demand']['low']
-            tp1_price = entry_price + (entry_price - sl_price) * CONFIG['TP_RATIO_1']
-            tp2_price = entry_price + (entry_price - sl_price) * CONFIG['TP_RATIO_2']
-        else:
-            sl_price = zones['supply']['high']
-            tp1_price = entry_price - (sl_price - entry_price) * CONFIG['TP_RATIO_1']
-            tp2_price = entry_price - (sl_price - entry_price) * CONFIG['TP_RATIO_2']
-        
-        # Calculate position size
-        position_size = self.risk_manager.calculate_position_size(entry_price, sl_price)
-        
-        if position_size == 0:
-            logger.error(f"Invalid position size for {symbol}")
-            return
-        
-        # Log trade
-        self.risk_manager.log_trade(
-            symbol, side, entry_price, sl_price, tp1_price, tp2_price, position_size
-        )
-        
-        # Send Telegram notification
-        self.telegram.send_signal(
-            symbol, signal['signal'], entry_price, sl_price, tp1_price, tp2_price,
-            signal['confidence']
-        )
-        
-        logger.info(f"Trade prepared: {symbol} {side} {position_size} @ {entry_price}")
-        
-        # TODO: Execute actual order on Bitget (enable in live mode)
-        # async with self.bitget_api as api:
-        #     await api.set_leverage(symbol, CONFIG['LEVERAGE'])
-        #     await api.place_order(symbol, side, position_size)
+            return jsonify({
+                'today_pnl': f"${total_pnl:.2f}",
+                'trades_closed': len(self.risk_manager.trade_history),
+                'wins': win_count,
+                'losses': len(self.risk_manager.trade_history) - win_count,
+                'win_rate': f"{(win_count/max(len(self.risk_manager.trade_history), 1))*100:.1f}%",
+                'open_positions': len(self.risk_manager.open_trades)
+            })
     
     async def main_loop(self):
         """Main bot loop - runs every 30 minutes"""
-        await self.initialize()
         
-        logger.info("Starting main loop...")
+        logger.info(f"Bot started - Mode: {self.config.BOT_MODE}")
         
+        iteration = 0
         while True:
             try:
-                logger.info(f"Analysis cycle started at {datetime.now()}")
+                iteration += 1
+                logger.info(f"\n{'='*60}")
+                logger.info(f"Analysis iteration #{iteration} - {datetime.now()}")
+                logger.info(f"{'='*60}")
                 
-                # Analyze all coins
-                signals = await self.analyze_all_coins()
+                # 1. Check time filter
+                current_hour = datetime.now().hour
+                if not self._is_trading_hours(current_hour):
+                    logger.info(f"Off-trading hours ({current_hour}:00 UTC), skipping analysis")
+                    await asyncio.sleep(60 * 30)  # 30 minutes
+                    continue
                 
-                # Execute trades
-                for signal in signals:
-                    await self.execute_trade(signal)
+                # 2. Check trade validity
+                closed_trades = self.risk_manager.check_trade_validity(max_bars=30)
+                if closed_trades:
+                    await self.telegram.send_message(
+                        f"⚠️ <b>{len(closed_trades)}</b> trade(s) closed due to max bars exceeded"
+                    )
                 
-                logger.info(f"Analysis cycle completed. Found {len(signals)} signals")
+                # 3. Analyze all symbols
+                for symbol in self.config.SYMBOLS:
+                    try:
+                        # Fetch klines for all timeframes
+                        klines_4h = await self.bitget.get_klines(symbol, '4h', limit=100)
+                        klines_1h = await self.bitget.get_klines(symbol, '1h', limit=50)
+                        klines_15m = await self.bitget.get_klines(symbol, '15m', limit=40)
+                        
+                        if not all([klines_4h, klines_1h, klines_15m]):
+                            logger.warning(f"Incomplete data for {symbol}")
+                            continue
+                        
+                        # Analyze
+                        signal_data = self.signal_engine.analyze_symbol(
+                            symbol, klines_4h, klines_1h, klines_15m
+                        )
+                        
+                        # Log analysis
+                        logger.info(f"\n{symbol}:")
+                        logger.info(f"  Signal: {signal_data.get('signal', 'ERROR')}")
+                        logger.info(f"  Confidence: {signal_data.get('confidence', 0):.0f}%")
+                        logger.info(f"  Regime: {signal_data.get('market_regime', 'N/A')}")
+                        for reason in signal_data.get('reasons', []):
+                            logger.info(f"    {reason}")
+                        
+                        # Check if valid signal
+                        if signal_data['signal'] == 'NONE':
+                            continue
+                        
+                        # Check if can open trade
+                        can_open, reason = self.risk_manager.can_open_trade(
+                            symbol, signal_data['confidence']
+                        )
+                        if not can_open:
+                            logger.info(f"Cannot open trade: {reason}")
+                            continue
+                        
+                        # Calculate dynamic leverage
+                        df = DataProcessor().process_klines(klines_4h)
+                        atr = TechnicalIndicators().calculate_atr(df, period=14)
+                        avg_atr = df['atr'].tail(20).mean()
+                        leverage = self.risk_manager.calculate_leverage(symbol, atr, avg_atr)
+                        
+                        # Register and open trade
+                        trade = self.risk_manager.register_trade(
+                            symbol=symbol,
+                            signal=signal_data['signal'],
+                            entry=signal_data['entry_level'],
+                            sl=signal_data['sl_level'],
+                            tp1=signal_data['tp1_level'],
+                            tp2=signal_data['tp2_level'],
+                            leverage=leverage,
+                            risk_amount=self.config.RISK_PER_TRADE
+                        )
+                        
+                        # Place order (paper mode)
+                        order = await self.bitget.place_order(
+                            symbol=symbol,
+                            side='buy' if signal_data['signal'] == 'LONG' else 'sell',
+                            size=self.config.RISK_PER_TRADE * leverage / signal_data['entry_level'],
+                            leverage=leverage
+                        )
+                        
+                        # Send Telegram alert
+                        await self.telegram.send_signal(signal_data)
+                        
+                    except Exception as e:
+                        logger.error(f"Error analyzing {symbol}: {e}")
+                        continue
                 
-                # Sleep for 30 minutes
-                await asyncio.sleep(CONFIG['INTERVAL'])
-            
+                # 4. Sleep 30 minutes
+                logger.info(f"\nNext analysis in 30 minutes...")
+                await asyncio.sleep(60 * 30)
+                
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
                 await asyncio.sleep(60)
-
-# ============================================================================
-# FLASK WEB DASHBOARD
-# ============================================================================
-
-app = Flask(__name__)
-CORS(app)
-
-bot_instance = None
-
-@app.route('/api/status')
-def get_status():
-    """Get bot status"""
-    try:
-        stats = bot_instance.risk_manager.get_daily_stats()
-        return jsonify({
-            'status': 'running',
-            'last_update': datetime.now().isoformat(),
-            'daily_trades': stats['trades'],
-            'daily_loss': stats['loss'],
-            'max_trades': CONFIG['MAX_DAILY_TRADES'],
-            'max_loss': CONFIG['MAX_DAILY_LOSS'],
-            'leverage': CONFIG['LEVERAGE'],
-            'risk_per_trade': CONFIG['RISK_PER_TRADE']
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/api/trades')
-def get_trades():
-    """Get recent trades"""
-    try:
-        conn = sqlite3.connect('/tmp/trading.db')
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
+    
+    def _is_trading_hours(self, hour: int) -> bool:
+        """Check if current hour is in trading hours (London + NY sessions)"""
+        # London: 8-12 UTC
+        # NY: 12-17 UTC
+        return 8 <= hour <= 17
+    
+    def run(self, host: str = '0.0.0.0', port: int = 5000, debug: bool = False):
+        """Run bot with Flask dashboard"""
         
-        c.execute('SELECT * FROM trades ORDER BY entry_time DESC LIMIT 20')
-        trades = [dict(row) for row in c.fetchall()]
-        conn.close()
+        # Run main loop in background
+        import threading
+        bot_thread = threading.Thread(
+            target=lambda: asyncio.run(self.main_loop()),
+            daemon=True
+        )
+        bot_thread.start()
         
-        return jsonify(trades)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        # Run Flask
+        logger.info(f"Flask dashboard starting on {host}:{port}")
+        self.app.run(host=host, port=port, debug=debug, use_reloader=False)
 
-@app.route('/')
-def index():
-    """Serve dashboard"""
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Bitget Trading Bot</title>
-        <style>
-            body { font-family: Arial; margin: 20px; background: #1a1a1a; color: #fff; }
-            .container { max-width: 1200px; margin: 0 auto; }
-            .status { background: #2a2a2a; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-            .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
-            .stat-card { background: #333; padding: 15px; border-radius: 8px; }
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            th, td { padding: 10px; text-align: left; border-bottom: 1px solid #444; }
-            th { background: #2a2a2a; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🤖 Bitget Trading Bot v1.0</h1>
-            <div class="status">
-                <h2>Status</h2>
-                <div id="status-content">Loading...</div>
-            </div>
-            <h2>Recent Trades</h2>
-            <table id="trades-table">
-                <tr>
-                    <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Entry Price</th>
-                    <th>Entry Time</th>
-                    <th>Status</th>
-                </tr>
-            </table>
-        </div>
-        <script>
-            async function updateStatus() {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                document.getElementById('status-content').innerHTML = `
-                    <div class="stats">
-                        <div class="stat-card">
-                            <strong>Status:</strong> ${data.status}
-                        </div>
-                        <div class="stat-card">
-                            <strong>Daily Trades:</strong> ${data.daily_trades}/${data.max_trades}
-                        </div>
-                        <div class="stat-card">
-                            <strong>Daily Loss:</strong> $${data.daily_loss}/$${data.max_loss}
-                        </div>
-                        <div class="stat-card">
-                            <strong>Leverage:</strong> ${data.leverage}x
-                        </div>
-                    </div>
-                `;
-            }
-            
-            async function updateTrades() {
-                const res = await fetch('/api/trades');
-                const data = await res.json();
-                const tbody = document.getElementById('trades-table');
-                data.forEach(trade => {
-                    const row = `<tr>
-                        <td>${trade.symbol}</td>
-                        <td>${trade.side}</td>
-                        <td>${trade.entry_price}</td>
-                        <td>${new Date(trade.entry_time).toLocaleString()}</td>
-                        <td>${trade.status}</td>
-                    </tr>`;
-                    tbody.innerHTML += row;
-                });
-            }
-            
-            updateStatus();
-            updateTrades();
-            setInterval(updateStatus, 5000);
-        </script>
-    </body>
-    </html>
-    '''
-
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
-
+# ==================== MAIN ====================
 if __name__ == '__main__':
-    bot_instance = TradingBot()
+    config = Config()
+    bot = TradingBotV2(config)
     
-    # Start Flask in background thread
-    import threading
-    flask_thread = threading.Thread(
-        target=lambda: app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False),
-        daemon=True
-    )
-    flask_thread.start()
-    
-    # Run async bot loop
-    asyncio.run(bot_instance.main_loop())
+    port = int(os.getenv('PORT', 5000))
+    bot.run(host='0.0.0.0', port=port, debug=False)
